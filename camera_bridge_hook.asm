@@ -1,8 +1,10 @@
 OPTION CASEMAP:NONE
 EXTERN MegaMixCameraBridge_HookedUpImpl:PROC
 EXTERN MegaMixCameraBridge_HookedPvRollImpl:PROC
+EXTERN MegaMixCameraBridge_HookedCameraBasisImpl:PROC
 PUBLIC MegaMixCameraBridge_HookedUpStub
 PUBLIC MegaMixCameraBridge_HookedPvRollStub
+PUBLIC MegaMixCameraBridge_HookedCameraBasisStub
 .code
 ; Legacy wrapper for the game's 0x1402FB7B0 setter.
 ; v61 does NOT install this hook; it remains here only for ABI compatibility.
@@ -33,4 +35,14 @@ MegaMixCameraBridge_HookedPvRollStub PROC
     pop r8
     ret
 MegaMixCameraBridge_HookedPvRollStub ENDP
+
+; FUN_1402FB0F0 calls FUN_1402FC3A0 through this site. The C++ implementation
+; temporarily substitutes the free-camera position/interest, calls the native
+; basis builder, then restores the native PV state.
+MegaMixCameraBridge_HookedCameraBasisStub PROC
+    sub rsp,28h
+    call MegaMixCameraBridge_HookedCameraBasisImpl
+    add rsp,28h
+    ret
+MegaMixCameraBridge_HookedCameraBasisStub ENDP
 END

@@ -121,6 +121,7 @@ MegaMixCameraBridge* MegaMixCameraBridge::s_active = nullptr;
 
 extern "C" void MegaMixCameraBridge_HookedUpStub();
 extern "C" void MegaMixCameraBridge_HookedPvRollStub();
+extern "C" void MegaMixCameraBridge_HookedCameraBasisStub();
 
 extern "C" void MegaMixCameraBridge_HookedPvRollImpl(float incoming_degrees) {
     MegaMixCameraBridge* self = MegaMixCameraBridge::s_active;
@@ -131,6 +132,41 @@ extern "C" void MegaMixCameraBridge_HookedPvRollImpl(float incoming_degrees) {
     const uintptr_t module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!module) return;
     *reinterpret_cast<volatile float*>(module + 0x00CC2B5A8) = degrees;
+}
+
+extern "C" void MegaMixCameraBridge_HookedCameraBasisImpl() {
+    MegaMixCameraBridge* self = MegaMixCameraBridge::s_active;
+    const uintptr_t module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (!module) return;
+
+    using BasisFn = void (*)();
+    static BasisFn original = nullptr;
+    if (!original)
+        original = reinterpret_cast<BasisFn>(module + MegaMixCameraBridge::CAMERA_BASIS_TARGET_RVA);
+
+    volatile float* pos = reinterpret_cast<volatile float*>(module + 0x00CC2B590);
+    volatile float* intr = reinterpret_cast<volatile float*>(module + 0x00CC2B59C);
+
+    float saved_pos[3] = {pos[0], pos[1], pos[2]};
+    float saved_intr[3] = {intr[0], intr[1], intr[2]};
+
+    if (self && self->m_enabled) {
+        pos[0] = self->m_free_position[0];
+        pos[1] = self->m_free_position[1];
+        pos[2] = self->m_free_position[2];
+        intr[0] = self->m_free_interest[0];
+        intr[1] = self->m_free_interest[1];
+        intr[2] = self->m_free_interest[2];
+    }
+
+    original();
+
+    pos[0] = saved_pos[0];
+    pos[1] = saved_pos[1];
+    pos[2] = saved_pos[2];
+    intr[0] = saved_intr[0];
+    intr[1] = saved_intr[1];
+    intr[2] = saved_intr[2];
 }
 
 extern "C" int MegaMixCameraBridge_HookedCull() {
@@ -305,6 +341,11 @@ bool MegaMixCameraBridge::install_detours() {
         }
     }
 
+    if (!install_camera_basis_callsite()) {
+        remove_detour(m_cull_detour);
+        return false;
+    }
+
     // A3DA applies its PV roll every time FUN_1402FAE00 runs. The exact
     // CALL at 0x1402FAE3A is only 5 bytes, so patch that call rather than
     // detouring the 8-byte 0x2FB7A0 setter. A nearby relay makes the patch
@@ -315,11 +356,13 @@ bool MegaMixCameraBridge::install_detours() {
         const unsigned char expected_call[5] = {0xE8, 0x61, 0x09, 0x00, 0x00};
         if (std::memcmp(m_pv_roll_original, expected_call, sizeof(expected_call)) != 0) {
             Log::write("CameraBridge v61: PV roll callsite signature mismatch at %p", m_pv_roll_callsite);
+            restore_camera_basis_callsite();
             remove_detour(m_cull_detour);
             return false;
         }
         m_pv_roll_relay = alloc_near(m_pv_roll_callsite);
         if (!m_pv_roll_relay) {
+            restore_camera_basis_callsite();
             remove_detour(m_cull_detour);
             return false;
         }
@@ -347,6 +390,57 @@ void MegaMixCameraBridge::restore_pv_roll_callsite() {
     m_pv_roll_relay = nullptr;
     m_pv_roll_callsite = nullptr;
     m_pv_roll_patched = false;
+}
+
+bool MegaMixCameraBridge::install_camera_basis_callsite() {
+    if (!m_valid || m_camera_basis_patched) return m_camera_basis_patched;
+    const uintptr_t module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (!module) return false;
+
+    m_camera_basis_callsite = reinterpret_cast<void*>(module + CAMERA_BASIS_CALL_RVA);
+    std::memcpy(m_camera_basis_original, m_camera_basis_callsite, sizeof(m_camera_basis_original));
+
+    // Verify this is the CALL from FUN_1402FB0F0 to FUN_1402FC3A0 by decoding
+    // its rel32 target instead of hard-coding the displacement.
+    if (m_camera_basis_original[0] != 0xE8) {
+        Log::write("CameraBridge v61: basis callsite is not CALL at %p", m_camera_basis_callsite);
+        return false;
+    }
+    std::int32_t old_rel = 0;
+    std::memcpy(&old_rel, m_camera_basis_original + 1, sizeof(old_rel));
+    const uintptr_t old_target = module + CAMERA_BASIS_CALL_RVA + 5 + static_cast<std::int64_t>(old_rel);
+    if (old_target != module + CAMERA_BASIS_TARGET_RVA) {
+        Log::write("CameraBridge v61: basis callsite target mismatch at %p (target=%p expected=%p)",
+                   m_camera_basis_callsite, reinterpret_cast<void*>(old_target),
+                   reinterpret_cast<void*>(module + CAMERA_BASIS_TARGET_RVA));
+        return false;
+    }
+
+    m_camera_basis_relay = alloc_near(m_camera_basis_callsite);
+    if (!m_camera_basis_relay) return false;
+    write_abs_jump_into_relay(m_camera_basis_relay,
+                              reinterpret_cast<const void*>(&MegaMixCameraBridge_HookedCameraBasisStub));
+    if (!write_rel_call(m_camera_basis_callsite, m_camera_basis_relay)) {
+        VirtualFree(m_camera_basis_relay, 0, MEM_RELEASE);
+        m_camera_basis_relay = nullptr;
+        m_camera_basis_callsite = nullptr;
+        return false;
+    }
+    m_camera_basis_patched = true;
+    Log::write("CameraBridge v61: basis callsite patched (%p -> %p)",
+               m_camera_basis_callsite, m_camera_basis_relay);
+    return true;
+}
+
+void MegaMixCameraBridge::restore_camera_basis_callsite() {
+    if (!m_camera_basis_patched) return;
+    if (m_camera_basis_callsite)
+        protect_write(m_camera_basis_callsite, m_camera_basis_original, sizeof(m_camera_basis_original));
+    if (m_camera_basis_relay)
+        VirtualFree(m_camera_basis_relay, 0, MEM_RELEASE);
+    m_camera_basis_callsite = nullptr;
+    m_camera_basis_relay = nullptr;
+    m_camera_basis_patched = false;
 }
 
 bool MegaMixCameraBridge::initialize() {
@@ -456,6 +550,7 @@ void MegaMixCameraBridge::set_enabled(bool enabled) {
        if(!patch_getters() || !patch_scalar_getters() || !patch_rotation_getter() || !install_detours()){
             m_enabled=false;
             restore_pv_roll_callsite();
+            restore_camera_basis_callsite();
             remove_detour(m_cull_detour);
             restore_rotation_getter();
             restore_scalar_getters();
@@ -468,6 +563,7 @@ void MegaMixCameraBridge::set_enabled(bool enabled) {
         Log::write("CameraBridge v61: FREE CAMERA ENABLED (native up-vector untouched; PV roll callsite override)");
     } else {
         restore_pv_roll_callsite();
+        restore_camera_basis_callsite();
         remove_detour(m_cull_detour);
         restore_rotation_getter();
         restore_scalar_getters();

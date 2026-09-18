@@ -20,3 +20,10 @@ target_compile_definitions(MegaMixFreeCam PRIVATE
 if(MSVC)
     set_property(TARGET MegaMixFreeCam PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
+
+
+add_custom_command(TARGET MegaMixFreeCam POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/MegaMixFreeCam.ini"
+        "$<TARGET_FILE_DIR:MegaMixFreeCam>/MegaMixFreeCam.ini"
+)

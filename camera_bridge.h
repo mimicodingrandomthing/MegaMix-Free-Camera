@@ -5,6 +5,7 @@
 extern "C" void MegaMixCameraBridge_HookedUpImpl(bool enabled, const float* up);
 extern "C" void MegaMixCameraBridge_HookedPvRollImpl(float incoming_degrees);
 extern "C" int MegaMixCameraBridge_HookedCull();
+extern "C" void MegaMixCameraBridge_HookedCameraBasisImpl();
 
 struct Vec3 { float x{}, y{}, z{}; };
 struct CameraPose {
@@ -32,6 +33,7 @@ public:
 private:
     friend void MegaMixCameraBridge_HookedUpImpl(bool enabled, const float* up);
     friend void MegaMixCameraBridge_HookedPvRollImpl(float incoming_degrees);
+    friend void MegaMixCameraBridge_HookedCameraBasisImpl();
     friend int MegaMixCameraBridge_HookedCull();
 
     using GetVecFn = const float* (*)();
@@ -50,6 +52,8 @@ private:
     };
 
     static constexpr uintptr_t CULL_RVA = 0x0045DFC0;
+    static constexpr uintptr_t CAMERA_BASIS_CALL_RVA = 0x002FB10E;
+    static constexpr uintptr_t CAMERA_BASIS_TARGET_RVA = 0x002FC3A0;
 
     bool patch_getters();
     void restore_getters();
@@ -86,6 +90,10 @@ private:
     void* m_pv_roll_relay = nullptr;
     unsigned char m_pv_roll_original[5]{};
     bool m_pv_roll_patched = false;
+    void* m_camera_basis_callsite = nullptr;
+    void* m_camera_basis_relay = nullptr;
+    unsigned char m_camera_basis_original[5]{};
+    bool m_camera_basis_patched = false;
 
     static MegaMixCameraBridge* s_active;
     static void hooked_rotation(float* x, float* y, float* z, float* roll);
@@ -97,6 +105,8 @@ private:
     bool m_rotation_patched = false;
     bool install_detours();
     void restore_pv_roll_callsite();
+    bool install_camera_basis_callsite();
+    void restore_camera_basis_callsite();
     bool patch_scalar_getters();
     bool patch_rotation_getter();
     void restore_rotation_getter();
